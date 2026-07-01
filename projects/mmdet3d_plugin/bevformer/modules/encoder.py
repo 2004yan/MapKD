@@ -72,7 +72,6 @@ class BEVFormerEncoder(TransformerLayerSequence):
             ref_3d = torch.stack((xs, ys, zs), -1)
             ref_3d = ref_3d.permute(0, 3, 1, 2).flatten(2).permute(0, 2, 1)
             ref_3d = ref_3d[None].repeat(bs, 1, 1, 1)
-
             return ref_3d
 
         # reference points on 2D bev plane, used in temporal self-attention (TSA).
@@ -113,7 +112,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
         reference_points = reference_points.permute(1, 0, 2, 3)
         D, B, num_query = reference_points.size()[:3]
         num_cam = lidar2img.size(1)
-        # import pdb;pdb.set_trace()
+
         reference_points = reference_points.view(
             D, B, 1, num_query, 4).repeat(1, 1, num_cam, 1, 1).unsqueeze(-1)
 
@@ -181,7 +180,6 @@ class BEVFormerEncoder(TransformerLayerSequence):
         """
 
         output = bev_query
-        #import pdb;pdb.set_trace()
         intermediate = []
 
         ref_3d = self.get_reference_points(
@@ -235,8 +233,10 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
         if self.return_intermediate:
             return torch.stack(intermediate)
-
-        return output
+        return dict(
+            bev = output,
+            depth = None,
+        )
 
 
 @TRANSFORMER_LAYER.register_module()

@@ -792,7 +792,7 @@ class SwinTransformer(BaseModule):
                             mode='bicubic')
                         state_dict[table_key] = table_pretrained_resized.view(
                             nH2, L2).permute(1, 0).contiguous()
-
+            
             # load state_dict
             self.load_state_dict(state_dict, False)
 

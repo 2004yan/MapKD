@@ -267,8 +267,16 @@ class _OSA_stage(nn.Sequential):
 
 @BACKBONES.register_module()
 class VoVNet(BaseModule):
-    def __init__(self, spec_name, input_ch=3, out_features=None, 
-                 frozen_stages=-1, norm_eval=True, pretrained=None, init_cfg=None):
+    def __init__(
+        self, 
+        spec_name, 
+        input_ch=3, 
+        out_features=None, 
+        frozen_stages=-1, 
+        norm_eval=True, 
+        pretrained=None, 
+        init_cfg=None
+    ):
         """
         Args:
             input_ch(int) : the number of input channel

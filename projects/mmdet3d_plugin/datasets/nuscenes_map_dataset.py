@@ -915,9 +915,11 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                  map_classes=None,
                  noise='None',
                  noise_std=0,
+                 debug=False,
                  *args, 
                  **kwargs):
         super().__init__(*args, **kwargs)
+        self.debug = debug
         self.map_ann_file = map_ann_file
 
         self.queue_length = queue_length
@@ -940,6 +942,7 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         self.is_vis_on_test = False
         self.noise = noise
         self.noise_std = noise_std
+
     @classmethod
     def get_map_classes(cls, map_classes=None):
         """Get class names of current dataset.
@@ -1023,26 +1026,41 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         Returns:
             dict: Training data dict of the corresponding index.
         """
-        queue = []
+        data_queue = []
 
-        index_list = list(range(index-self.queue_length, index))
-        random.shuffle(index_list)
-        index_list = sorted(index_list[1:])
-        index_list.append(index)
+        # temporal aug
+        prev_indexs_list = list(range(index-self.queue_length, index))
+        random.shuffle(prev_indexs_list)
+        prev_indexs_list = sorted(prev_indexs_list[1:], reverse=True)
+        ##
 
-        for i in index_list:
+        input_dict = self.get_data_info(index)
+        if input_dict is None:
+            return None
+        frame_idx = input_dict['frame_idx']
+        scene_token = input_dict['scene_token']
+        self.pre_pipeline(input_dict)
+        example = self.pipeline(input_dict)
+        example = self.vectormap_pipeline(example,input_dict)
+        if self.filter_empty_gt and \
+                (example is None or ~(example['gt_labels_3d']._data != -1).any()):
+            return None
+        data_queue.insert(0, example)
+        for i in prev_indexs_list:
             i = max(0, i)
             input_dict = self.get_data_info(i)
             if input_dict is None:
                 return None
-            self.pre_pipeline(input_dict)
-            example = self.pipeline(input_dict)
-            example = self.vectormap_pipeline(example,input_dict)
-            if self.filter_empty_gt and \
-                    (example is None or ~(example['gt_labels_3d']._data != -1).any()):
-                return None
-            queue.append(example)
-        return self.union2one(queue)
+            if input_dict['frame_idx'] < frame_idx and input_dict['scene_token'] == scene_token:
+                self.pre_pipeline(input_dict)
+                example = self.pipeline(input_dict)
+                example = self.vectormap_pipeline(example,input_dict)
+                if self.filter_empty_gt and \
+                        (example is None or ~(example['gt_labels_3d']._data != -1).any()):
+                    return None
+                frame_idx = input_dict['frame_idx']
+            data_queue.insert(0, copy.deepcopy(example))
+        return self.union2one(data_queue)
 
     def union2one(self, queue):
         """
@@ -1050,20 +1068,18 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         """
         imgs_list = [each['img'].data for each in queue]
         metas_map = {}
-        prev_scene_token = None
         prev_pos = None
         prev_angle = None
         for i, each in enumerate(queue):
             metas_map[i] = each['img_metas'].data
-            if metas_map[i]['scene_token'] != prev_scene_token:
-                metas_map[i]['prev_bev_exists'] = False
-                prev_scene_token = metas_map[i]['scene_token']
+            if i == 0:
+                metas_map[i]['prev_bev'] = False
                 prev_pos = copy.deepcopy(metas_map[i]['can_bus'][:3])
                 prev_angle = copy.deepcopy(metas_map[i]['can_bus'][-1])
                 metas_map[i]['can_bus'][:3] = 0
                 metas_map[i]['can_bus'][-1] = 0
             else:
-                metas_map[i]['prev_bev_exists'] = True
+                metas_map[i]['prev_bev'] = True
                 tmp_pos = copy.deepcopy(metas_map[i]['can_bus'][:3])
                 tmp_angle = copy.deepcopy(metas_map[i]['can_bus'][-1])
                 metas_map[i]['can_bus'][:3] -= prev_pos
@@ -1215,6 +1231,9 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         if self.is_vis_on_test:
             example = self.vectormap_pipeline(example, input_dict)
         return example
+    
+    def __len__(self):
+        return len(self.data_infos)
 
     def __getitem__(self, idx):
         """Get item from infos according to the given index.
@@ -1224,12 +1243,12 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         if self.test_mode:
             return self.prepare_test_data(idx)
         while True:
-
             data = self.prepare_train_data(idx)
             if data is None:
                 idx = self._rand_another(idx)
                 continue
             return data
+    
     def _format_gt(self):
         gt_annos = []
         print('Start to convert gt map format...')
@@ -1350,7 +1369,9 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                          result_path,
                          logger=None,
                          metric='chamfer',
-                         result_name='pts_bbox'):
+                         result_name='pts_bbox',
+                         thresholds=None,
+                         split_file=None):
         """Evaluation for a single model in nuScenes protocol.
 
         Args:
@@ -1373,9 +1394,29 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         with open(result_path,'r') as f:
             pred_results = json.load(f)
         gen_results = pred_results['results']
+
         with open(self.map_ann_file,'r') as ann_f:
             gt_anns = json.load(ann_f)
-        annotations = gt_anns['GTs']
+        annotations = gt_anns['GTs'][::self.load_interval]
+        
+        if split_file is not None:
+            all_sample_tokens_gt = [annotation['sample_token'] for annotation in annotations]
+            all_sample_tokens_pred = [gen_result['sample_token'] for gen_result in gen_results]
+            with open(split_file,'r') as tkn_f:
+                split_tokens = tkn_f.readlines()
+
+            split_indices = []
+            for split_token in split_tokens:
+                if split_token.strip() in all_sample_tokens_gt:
+                    split_indices.append(all_sample_tokens_gt.index(split_token.strip()))
+            annotations = [annotations[split_index] for split_index in split_indices]
+
+            split_indices = []
+            for split_token in split_tokens:
+                if split_token.strip() in all_sample_tokens_pred:
+                    split_indices.append(all_sample_tokens_pred.index(split_token.strip()))
+            gen_results = [gen_results[split_index] for split_index in split_indices]
+        
         cls_gens, cls_gts = format_res_gt_by_classes(result_path,
                                                      gen_results,
                                                      annotations,
@@ -1393,9 +1434,9 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         for metric in metrics:
             print('-*'*10+f'use metric:{metric}'+'-*'*10)
 
-            if metric == 'chamfer':
+            if metric == 'chamfer' and thresholds is None:
                 thresholds = [0.5,1.0,1.5]
-            elif metric == 'iou':
+            elif metric == 'iou' and thresholds is None:
                 thresholds= np.linspace(.5, 0.95, int(np.round((0.95 - .5) / .05)) + 1, endpoint=True)
             cls_aps = np.zeros((len(thresholds),self.NUM_MAPCLASSES))
 
@@ -1440,7 +1481,9 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                  result_names=['pts_bbox'],
                  show=False,
                  out_dir=None,
-                 pipeline=None):
+                 pipeline=None,
+                 thresholds=None,
+                 split_file=None):
         """Evaluation in nuScenes protocol.
 
         Args:
@@ -1467,14 +1510,13 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
             results_dict = dict()
             for name in result_names:
                 print('Evaluating bboxes of {}'.format(name))
-                ret_dict = self._evaluate_single(result_files[name], metric=metric)
+                ret_dict = self._evaluate_single(result_files[name], metric=metric, thresholds=thresholds, split_file=split_file)
             results_dict.update(ret_dict)
         elif isinstance(result_files, str):
-            results_dict = self._evaluate_single(result_files, metric=metric)
-
+            results_dict = self._evaluate_single(result_files, metric=metric, thresholds=thresholds, split_file=split_file)
         if tmp_dir is not None:
             tmp_dir.cleanup()
-
+        
         if show:
             self.show(results, out_dir, pipeline=pipeline)
         return results_dict

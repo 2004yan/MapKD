@@ -13,102 +13,8 @@ from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
                          wrap_fp16_model)
-import mmcv
-import torch
-from mmcv.image import tensor2imgs
-from os import path as osp
 
-from mmdet3d.models import (Base3DDetector, Base3DSegmentor,
-                            SingleStageMono3DDetector)
-import pickle
-from torch.profiler import profile, record_function, ProfilerActivity
-import os
-
-
-
-def single_gpu_test(model,
-                    data_loader,
-                    show=False,
-                    out_dir=None,
-                    show_score_thr=0.3):
-    """Test model with single gpu.
-
-    This method tests model with single gpu and gives the 'show' option.
-    By setting ``show=True``, it saves the visualization results under
-    ``out_dir``.
-
-    Args:
-        model (nn.Module): Model to be tested.
-        data_loader (nn.Dataloader): Pytorch data loader.
-        show (bool): Whether to save viualization results.
-            Default: True.
-        out_dir (str): The path to save visualization results.
-            Default: None.
-
-    Returns:
-        list[dict]: The prediction results.
-    """
-    model.eval()
-    results = []
-    dataset = data_loader.dataset
-    prog_bar = mmcv.ProgressBar(len(dataset))
-    for i, data in enumerate(data_loader):
-        with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
-
-        # For MapTR series, please uncomment this line
-        # For StreamMapNet, please comment this line
-        result[0]['pts_bbox']['sample_idx'] = data['img_metas'][0].data[0][0]['sample_idx']
-
-        if show:
-            # Visualize the results of MMDetection3D model
-            # 'show_results' is MMdetection3D visualization API
-            models_3d = (Base3DDetector, Base3DSegmentor,
-                         SingleStageMono3DDetector)
-            if isinstance(model.module, models_3d):
-                model.module.show_results(data, result, out_dir=out_dir)
-            # Visualize the results of MMDetection model
-            # 'show_result' is MMdetection visualization API
-            else:
-                batch_size = len(result)
-                if batch_size == 1 and isinstance(data['img'][0],
-                                                  torch.Tensor):
-                    img_tensor = data['img'][0]
-                else:
-                    img_tensor = data['img'][0].data[0]
-                img_metas = data['img_metas'][0].data[0]
-                imgs = tensor2imgs(img_tensor, **img_metas[0]['img_norm_cfg'])
-                assert len(imgs) == len(img_metas)
-
-                for i, (img, img_meta) in enumerate(zip(imgs, img_metas)):
-                    h, w, _ = img_meta['img_shape']
-                    img_show = img[:h, :w, :]
-
-                    ori_h, ori_w = img_meta['ori_shape'][:-1]
-                    img_show = mmcv.imresize(img_show, (ori_w, ori_h))
-
-                    if out_dir:
-                        out_file = osp.join(out_dir, img_meta['ori_filename'])
-                    else:
-                        out_file = None
-
-                    model.module.show_result(
-                        img_show,
-                        result[i],
-                        show=show,
-                        out_file=out_file,
-                        score_thr=show_score_thr)
-        results.extend(result)
-        batch_size = len(result)
-        for _ in range(batch_size):
-            prog_bar.update()
-    
-    with open('/app/out/mapping_results.pickle', 'wb') as handle:
-        pickle.dump(results, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    return results
-
-# from mmdet3d.apis import single_gpu_test
+from mmdet3d.apis import single_gpu_test
 from mmdet3d.datasets import build_dataset
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from mmdet3d.models import build_model
@@ -316,10 +222,9 @@ def main():
         model.PALETTE = dataset.PALETTE
 
     if not distributed:
-        import pdb;pdb.set_trace()
-        # assert False
-        model = MMDataParallel(model, device_ids=[0])
-        outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
+        assert False
+        # model = MMDataParallel(model, device_ids=[0])
+        # outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
     else:
         model = MMDistributedDataParallel(
             model.cuda(),
@@ -339,7 +244,7 @@ def main():
             '/')[-1].split('.')[-2], time.ctime().replace(' ', '_').replace(':', '_'))
         if args.format_only:
             dataset.format_results(outputs, **kwargs)
-
+        
         if args.eval:
             eval_kwargs = cfg.get('evaluation', {}).copy()
             # hard-code way to remove EvalHook args
@@ -350,7 +255,7 @@ def main():
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
 
-            print(dataset.evaluate(outputs, **eval_kwargs))
+            print(dataset.evaluate(outputs, **eval_kwargs, thresholds=[0.5, 1.0, 1.5]))
 
 
 if __name__ == '__main__':

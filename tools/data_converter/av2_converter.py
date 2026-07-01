@@ -41,6 +41,12 @@ def parse_args():
         default=64,
         required=False,
         help='workers to process data')
+    parser.add_argument(
+        '--out-dir',
+        type=str,
+        default='./data/kitti',
+        required='False',
+        help='name of info pkl')
     args = parser.parse_args()
     return args
 
@@ -201,4 +207,4 @@ if __name__ == '__main__':
             root_path=args.data_root,
             split=name,
             info_prefix='av2',
-            dest_path=args.data_root,)
+            dest_path=args.out_dir,)

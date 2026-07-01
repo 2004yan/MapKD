@@ -85,7 +85,6 @@ class GridMask(nn.Module):
     def forward(self, x):
         if np.random.rand() > self.prob or not self.training:
             return x
-        # print(x.size())
         n,c,h,w = x.size()
         x = x.view(-1,h,w)
         hh = int(1.5*h)
